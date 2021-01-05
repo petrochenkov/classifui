@@ -4,6 +4,8 @@
 
 use clap::App;
 use fxhash::FxHashMap as HashMap;
+use liblinear::{LibLinearModel as _, SolverType};
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use std::borrow::Cow;
@@ -13,7 +15,7 @@ use std::error::Error;
 use std::path::Path;
 use std::{fs, mem};
 
-pub fn is_id_continue(c: char) -> bool {
+fn is_id_continue(c: char) -> bool {
     // This is exactly XID_Continue.
     // We also add fast-path for ascii idents
     ('a'..='z').contains(&c)
@@ -158,7 +160,6 @@ fn train() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // fs::write("features.txt", &format!("{:#?}", res))?;
     fs::create_dir_all("model/classes").ok();
     let feature_map_str = serde_json::to_string(&feature_map.map)?;
     fs::write("model/features.json", feature_map_str)?;
@@ -175,9 +176,6 @@ fn train() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        use liblinear::LibLinearModel;
-        use liblinear::SolverType;
-
         let input_data = liblinear::util::TrainingInput::from_sparse_features(labels, features)
             .map_err(|e| e.to_string())?;
 
@@ -185,9 +183,18 @@ fn train() -> Result<(), Box<dyn Error>> {
         builder.problem().input_data(input_data);
         builder.parameters().solver_type(SolverType::L1R_L2LOSS_SVC);
         let model = builder.build_model()?;
-        model
-            .save_to_disk(&format!("model/classes/{}.txt", class_to_train))
-            .map_err(|e| e.to_string())?;
+
+        let mut weights = Vec::new();
+        for feature_index in 1..i32::try_from(model.num_features()).unwrap() + 1 {
+            let weight = model.feature_coefficient(feature_index, 0);
+            if weight != 0.0 {
+                weights.push((u32::try_from(feature_index).unwrap(), weight));
+            }
+        }
+
+        let model = Model { labels: model.labels().clone(), weights };
+        let model_str = serde_json::to_string(&model)?;
+        fs::write(&format!("model/classes/{}.txt", class_to_train), model_str)?;
     }
 
     Ok(())
@@ -199,18 +206,14 @@ fn classify() -> Result<(), Box<dyn Error>> {
     let feature_map: HashMap<String, u32> = serde_json::from_str(&feature_map_str)?;
     let mut feature_map = FeatureMap { map: feature_map, features: Vec::new() };
 
-    use liblinear::util::PredictionInput;
-    use liblinear::LibLinearModel;
-    use liblinear::Serializer;
-
     let mut models = HashMap::default();
     for entry in fs::read_dir("model/classes")? {
         let entry = entry?;
-        println!("Loading model: {:?}", entry);
         let model_path = entry.path();
         let model_name =
             model_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_owned()).unwrap();
-        let model = Serializer::load_model(model_path.to_str().unwrap())?;
+        let model_str = fs::read_to_string(model_path)?;
+        let model: Model = serde_json::from_str(&model_str)?;
         models.insert(model_name, model);
     }
 
@@ -219,24 +222,14 @@ fn classify() -> Result<(), Box<dyn Error>> {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
                 let path = entry.path();
-                let test_name =
-                    path.file_name().and_then(|s| s.to_str()).map(|s| s.to_owned()).unwrap();
+                let test_name = path.strip_prefix(root)?.display();
                 if let Ok(s) = fs::read_to_string(&path) {
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), true);
                     let mut model_scores = Vec::new();
                     for (model_name, model) in &models {
-                        let mut dense_features = vec![0.0; feature_map.map.len()];
-                        for &feat in &features {
-                            dense_features[feat as usize - 1] = 1.0;
-                        }
+                        let score = get_dec_value(&model.weights, &features);
+                        let score = if model.labels[0] == 1 { score } else { -score };
 
-                        // FIXME: `from_sparse_features` in liblinear-rs doesn't work correctly.
-                        let prediction_input = PredictionInput::from_dense_features(dense_features)
-                            .map_err(|e| e.to_string())?;
-                        let predict =
-                            model.predict_values(prediction_input).map_err(|e| e.to_string())?;
-                        let score = predict.0[0];
-                        let score = if model.labels()[0] == 1 { score } else { -score };
                         model_scores.push((model_name, score));
                     }
 
@@ -257,11 +250,28 @@ fn classify() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[derive(Serialize, Deserialize)]
+struct Model {
+    labels: Vec<i32>,
+    weights: Vec<(u32, f64)>,
+}
+
+fn get_dec_value(m: &[(u32, f64)], x: &[u32]) -> f64 {
+    let mut res = 0.0;
+    for index in x {
+        match m.binary_search_by_key(index, |node| node.0) {
+            Ok(i) => res += m[i].1,
+            Err(..) => {}
+        }
+    }
+    res
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("UI test classifier")
         .args_from_usage(
             "--train 'Train the classifier'
-                               --classify 'Classify tests'",
+             --classify 'Classify tests'",
         )
         .get_matches();
 

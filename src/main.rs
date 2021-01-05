@@ -4,7 +4,8 @@
 
 use clap::App;
 use fxhash::FxHashMap as HashMap;
-use liblinear::{LibLinearModel as _, SolverType};
+use liblinear::util::TrainingInput;
+use liblinear::{Builder as LiblinearBuilder, LibLinearModel as _, SolverType};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -160,9 +161,7 @@ fn train() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    fs::create_dir_all("model/classes").ok();
-    let feature_map_str = serde_json::to_string(&feature_map.map)?;
-    fs::write("model/features.json", feature_map_str)?;
+    let mut model = Model { features: feature_map.map, classes: HashMap::default() };
 
     for (class_to_train, _) in &classes {
         println!("Training model for {}", class_to_train);
@@ -176,46 +175,40 @@ fn train() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        let input_data = liblinear::util::TrainingInput::from_sparse_features(labels, features)
-            .map_err(|e| e.to_string())?;
+        let input_data =
+            TrainingInput::from_sparse_features(labels, features).map_err(|e| e.to_string())?;
 
-        let mut builder = liblinear::Builder::new();
+        let mut builder = LiblinearBuilder::new();
         builder.problem().input_data(input_data);
         builder.parameters().solver_type(SolverType::L1R_L2LOSS_SVC);
-        let model = builder.build_model()?;
+        let liblinear_model = builder.build_model()?;
 
         let mut weights = Vec::new();
-        for feature_index in 1..i32::try_from(model.num_features()).unwrap() + 1 {
-            let weight = model.feature_coefficient(feature_index, 0);
+        for feature_index in 1..i32::try_from(liblinear_model.num_features()).unwrap() + 1 {
+            let weight = liblinear_model.feature_coefficient(feature_index, 0);
             if weight != 0.0 {
                 weights.push((u32::try_from(feature_index).unwrap(), weight));
             }
         }
 
-        let model = Model { labels: model.labels().clone(), weights };
-        let model_str = serde_json::to_string(&model)?;
-        fs::write(&format!("model/classes/{}.txt", class_to_train), model_str)?;
+        model.classes.insert(
+            class_to_train.clone(),
+            SubModel { labels: liblinear_model.labels().clone(), weights },
+        );
     }
+
+    let model_str = serde_json::to_string(&model)?;
+    fs::write("model.json", model_str)?;
 
     Ok(())
 }
 
 fn classify() -> Result<(), Box<dyn Error>> {
     let root = Path::new("C:/msys64/home/we/rust/src/test/ui");
-    let feature_map_str = fs::read_to_string("model/features.json")?;
-    let feature_map: HashMap<String, u32> = serde_json::from_str(&feature_map_str)?;
-    let mut feature_map = FeatureMap { map: feature_map, features: Vec::new() };
 
-    let mut models = HashMap::default();
-    for entry in fs::read_dir("model/classes")? {
-        let entry = entry?;
-        let model_path = entry.path();
-        let model_name =
-            model_path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_owned()).unwrap();
-        let model_str = fs::read_to_string(model_path)?;
-        let model: Model = serde_json::from_str(&model_str)?;
-        models.insert(model_name, model);
-    }
+    let model_str = fs::read_to_string("model.json")?;
+    let mut model: Model = serde_json::from_str(&model_str)?;
+    let mut feature_map = FeatureMap { map: mem::take(&mut model.features), features: Vec::new() };
 
     for dir in &[&root.join("issues"), root] {
         for entry in fs::read_dir(dir)? {
@@ -226,7 +219,7 @@ fn classify() -> Result<(), Box<dyn Error>> {
                 if let Ok(s) = fs::read_to_string(&path) {
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), true);
                     let mut model_scores = Vec::new();
-                    for (model_name, model) in &models {
+                    for (model_name, model) in &model.classes {
                         let score = get_dec_value(&model.weights, &features);
                         let score = if model.labels[0] == 1 { score } else { -score };
 
@@ -251,9 +244,15 @@ fn classify() -> Result<(), Box<dyn Error>> {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Model {
+struct SubModel {
     labels: Vec<i32>,
     weights: Vec<(u32, f64)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Model {
+    features: HashMap<String, u32>,
+    classes: HashMap<String, SubModel>,
 }
 
 fn get_dec_value(m: &[(u32, f64)], x: &[u32]) -> f64 {

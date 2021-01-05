@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::path::Path;
@@ -132,18 +131,21 @@ fn train() -> Result<(), Box<dyn Error>> {
     let root = Path::new("C:/msys64/home/we/rust/src/test/ui");
     let mut feature_map = FeatureMap::default();
     feature_map.features.push(String::new()); // feature indices must start with 1
-    let mut classes = BTreeMap::<String, Vec<Vec<u32>>>::default();
+    let mut class_vectors = Vec::new();
     for top_entry in fs::read_dir(root)? {
         let top_entry = top_entry?;
         if !top_entry.file_type()?.is_dir()
             || top_entry.file_name() == "auxiliary"
             || top_entry.file_name() == "issues"
+            || top_entry.file_name() == "error-codes"
+            || top_entry.file_name() == "rfcs"
         {
             continue;
         }
 
         let top_path = top_entry.path();
         let class = top_path.file_name().unwrap().to_str().unwrap();
+        let mut vectors = Vec::new();
         for entry in
             WalkDir::new(&top_path).into_iter().filter_entry(|e| e.file_name() != "auxiliary")
         {
@@ -151,52 +153,45 @@ fn train() -> Result<(), Box<dyn Error>> {
             if !entry.file_type().is_dir() {
                 let path = entry.path();
                 if let Ok(s) = fs::read_to_string(path) {
-                    classes.entry(class.to_owned()).or_default().push(tokens_to_features(
-                        &mut feature_map,
-                        &tokenize(&s),
-                        false,
-                    ));
+                    vectors.push(tokens_to_features(&mut feature_map, &tokenize(&s), false));
                 }
             }
         }
+        class_vectors.push((class.to_owned(), vectors));
     }
 
-    let mut model = Model { features: feature_map.map, classes: HashMap::default() };
-
-    for (class_to_train, _) in &classes {
-        println!("Training model for {}", class_to_train);
-        let mut labels = Vec::new();
-        let mut features = Vec::new();
-        for (class, vectors) in &classes {
-            let label = if class == class_to_train { 1.0 } else { 0.0 };
-            for vector in vectors {
-                labels.push(label);
-                features.push(vector.iter().copied().map(|i| (i, 1.0)).collect());
-            }
+    let mut labels = Vec::new();
+    let mut features = Vec::new();
+    for (class_idx, (_, vectors)) in class_vectors.iter().enumerate() {
+        for vector in vectors {
+            labels.push(class_idx as f64);
+            features.push(vector.iter().copied().map(|i| (i, 1.0)).collect());
         }
+    }
 
-        let input_data =
-            TrainingInput::from_sparse_features(labels, features).map_err(|e| e.to_string())?;
+    let input_data =
+        TrainingInput::from_sparse_features(labels, features).map_err(|e| e.to_string())?;
 
-        let mut builder = LiblinearBuilder::new();
-        builder.problem().input_data(input_data);
-        builder.parameters().solver_type(SolverType::L1R_L2LOSS_SVC);
-        let liblinear_model = builder.build_model()?;
+    let mut builder = LiblinearBuilder::new();
+    builder.problem().input_data(input_data);
+    builder.parameters().solver_type(SolverType::L1R_L2LOSS_SVC);
+    let liblinear_model = builder.build_model()?;
 
+    let mut classes = HashMap::default();
+    for (class_idx, (class_name, _)) in class_vectors.iter().enumerate() {
+        let class_idx = i32::try_from(class_idx).unwrap();
         let mut weights = Vec::new();
         for feature_index in 1..i32::try_from(liblinear_model.num_features()).unwrap() + 1 {
-            let weight = liblinear_model.feature_coefficient(feature_index, 0);
+            let weight = liblinear_model.feature_coefficient(feature_index, class_idx);
             if weight != 0.0 {
                 weights.push((u32::try_from(feature_index).unwrap(), weight));
             }
         }
 
-        model.classes.insert(
-            class_to_train.clone(),
-            SubModel { labels: liblinear_model.labels().clone(), weights },
-        );
+        classes.insert(class_name.clone(), weights);
     }
 
+    let model = Model { features: feature_map.map, classes };
     let model_str = serde_json::to_string(&model)?;
     fs::write("model.json", model_str)?;
 
@@ -219,10 +214,8 @@ fn classify() -> Result<(), Box<dyn Error>> {
                 if let Ok(s) = fs::read_to_string(&path) {
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), true);
                     let mut model_scores = Vec::new();
-                    for (model_name, model) in &model.classes {
-                        let score = get_dec_value(&model.weights, &features);
-                        let score = if model.labels[0] == 1 { score } else { -score };
-
+                    for (model_name, weights) in &model.classes {
+                        let score = get_dec_value(weights, &features);
                         model_scores.push((model_name, score));
                     }
 
@@ -244,15 +237,9 @@ fn classify() -> Result<(), Box<dyn Error>> {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SubModel {
-    labels: Vec<i32>,
-    weights: Vec<(u32, f64)>,
-}
-
-#[derive(Serialize, Deserialize)]
 struct Model {
     features: HashMap<String, u32>,
-    classes: HashMap<String, SubModel>,
+    classes: HashMap<String, Vec<(u32, f64)>>,
 }
 
 fn get_dec_value(m: &[(u32, f64)], x: &[u32]) -> f64 {

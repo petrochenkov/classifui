@@ -15,6 +15,15 @@ use std::error::Error;
 use std::path::Path;
 use std::{fs, mem};
 
+fn is_id_start(c: char) -> bool {
+    // This is XID_Start OR '_' (which formally is not a XID_Start).
+    // We also add fast-path for ascii idents
+    ('a'..='z').contains(&c)
+        || ('A'..='Z').contains(&c)
+        || c == '_'
+        || (c > '\x7f' && unicode_xid::UnicodeXID::is_xid_start(c))
+}
+
 fn is_id_continue(c: char) -> bool {
     // This is exactly XID_Continue.
     // We also add fast-path for ascii idents
@@ -72,34 +81,44 @@ fn tokenize(s: &str) -> Vec<String> {
     res
 }
 
+// Turns all identifiers and digits into a single token.
+fn generalize(s: &str) -> &str {
+    let first_char = s.chars().next().unwrap();
+    if is_id_continue(first_char) {
+        if is_id_start(first_char) { "и" } else { "ц" }
+    } else {
+        s
+    }
+}
+
 fn tokens_to_features(
     feature_map: &mut FeatureMap,
     tokens: &[String],
     read_only: bool,
 ) -> Vec<u32> {
     let mut res = Vec::new();
-    for token in tokens {
-        if let Some(feat) = feature_map.intern(token.into(), read_only) {
+    let mut push = |token| {
+        if let Some(feat) = feature_map.intern(token, read_only) {
             res.push(feat);
         }
+    };
+    for token in tokens {
+        push(token.into());
+        push(generalize(token).into());
     }
     for [token1, token2] in tokens.array_windows() {
-        if let Some(feat) = feature_map.intern(format!("{} {}", token1, token2).into(), read_only) {
-            res.push(feat);
-        }
+        push(format!("{} {}", token1, token2).into());
+        push(format!("{} {}", generalize(token1), generalize(token2)).into());
     }
     for [token1, _, token3] in tokens.array_windows() {
-        if let Some(feat) = feature_map.intern(format!("{}  {}", token1, token3).into(), read_only)
-        {
-            res.push(feat);
-        }
+        push(format!("{}  {}", token1, token3).into());
+        push(format!("{}  {}", generalize(token1), generalize(token3)).into());
     }
     for [token1, token2, token3] in tokens.array_windows() {
-        if let Some(feat) =
-            feature_map.intern(format!("{} {} {}", token1, token2, token3).into(), read_only)
-        {
-            res.push(feat);
-        }
+        push(format!("{} {} {}", token1, token2, token3).into());
+        push(
+            format!("{} {} {}", generalize(token1), generalize(token2), generalize(token3)).into(),
+        );
     }
     res.sort_unstable();
     res.dedup();

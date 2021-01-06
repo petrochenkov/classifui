@@ -15,6 +15,41 @@ use std::error::Error;
 use std::path::Path;
 use std::{fs, mem};
 
+enum LexerState {
+    Start,
+    ContinueIdent,
+    ContinuePunct,
+}
+
+/// Mapping string-based features to integer indices and back.
+#[derive(Default)]
+struct FeatureMap {
+    features: Vec<String>,
+    map: HashMap<String, u32>,
+}
+
+/// Linear SVM model produced by training and used during classification.
+#[derive(Serialize, Deserialize)]
+struct Model {
+    features: HashMap<String, u32>,
+    classes: HashMap<String, Vec<(u32, f64)>>,
+}
+
+impl FeatureMap {
+    fn intern(&mut self, feature: Cow<str>, read_only: bool) -> Option<u32> {
+        if let Some(index) = self.map.get(&*feature) {
+            Some(*index)
+        } else if read_only {
+            None
+        } else {
+            let new_index = u32::try_from(self.features.len()).unwrap();
+            self.features.push(feature.clone().into_owned());
+            self.map.insert(feature.into_owned(), new_index);
+            Some(new_index)
+        }
+    }
+}
+
 fn is_id_start(c: char) -> bool {
     // This is XID_Start OR '_' (which formally is not a XID_Start).
     // We also add fast-path for ascii idents
@@ -34,14 +69,9 @@ fn is_id_continue(c: char) -> bool {
         || (c > '\x7f' && unicode_xid::UnicodeXID::is_xid_continue(c))
 }
 
-enum State {
-    Start,
-    ContinueIdent,
-    ContinuePunct,
-}
-
+/// Turn text of a test into tokens.
 fn tokenize(s: &str) -> Vec<String> {
-    let mut state = State::Start;
+    let mut state = LexerState::Start;
     let mut res = Vec::new();
     let mut curtok = String::new();
     for c in s.chars() {
@@ -49,28 +79,28 @@ fn tokenize(s: &str) -> Vec<String> {
             if !curtok.is_empty() {
                 res.push(mem::take(&mut curtok));
             }
-            state = State::Start;
+            state = LexerState::Start;
         } else if is_id_continue(c) {
             match state {
-                State::Start | State::ContinueIdent => {}
-                State::ContinuePunct => {
+                LexerState::Start | LexerState::ContinueIdent => {}
+                LexerState::ContinuePunct => {
                     assert!(!curtok.is_empty());
                     res.push(mem::take(&mut curtok));
                 }
             }
             curtok.push(c);
-            state = State::ContinueIdent;
+            state = LexerState::ContinueIdent;
         } else {
             // Punct
             match state {
-                State::Start | State::ContinuePunct => {}
-                State::ContinueIdent => {
+                LexerState::Start | LexerState::ContinuePunct => {}
+                LexerState::ContinueIdent => {
                     assert!(!curtok.is_empty());
                     res.push(mem::take(&mut curtok));
                 }
             }
             curtok.push(c);
-            state = State::ContinuePunct;
+            state = LexerState::ContinuePunct;
         }
     }
 
@@ -81,7 +111,7 @@ fn tokenize(s: &str) -> Vec<String> {
     res
 }
 
-// Turns all identifiers and digits into a single token.
+/// Turns all identifiers and digits into a single token.
 fn generalize(s: &str) -> &str {
     let first_char = s.chars().next().unwrap();
     if is_id_continue(first_char) {
@@ -91,6 +121,8 @@ fn generalize(s: &str) -> &str {
     }
 }
 
+/// Turn tokens of a test into features (in their index representation).
+/// Tokens, "generalized" tokens, and their bigrams and trigrams are used as features.
 fn tokens_to_features(
     feature_map: &mut FeatureMap,
     tokens: &[String],
@@ -125,29 +157,23 @@ fn tokens_to_features(
     res
 }
 
-#[derive(Default)]
-struct FeatureMap {
-    features: Vec<String>,
-    map: HashMap<String, u32>,
-}
-
-impl FeatureMap {
-    fn intern(&mut self, feature: Cow<str>, read_only: bool) -> Option<u32> {
-        if let Some(index) = self.map.get(&*feature) {
-            Some(*index)
-        } else if read_only {
-            None
-        } else {
-            let new_index = u32::try_from(self.features.len()).unwrap();
-            self.features.push(feature.clone().into_owned());
-            self.map.insert(feature.into_owned(), new_index);
-            Some(new_index)
+/// Dot product of weight vector from the trained linear model
+/// and feature vector from a new test case that needs to be classified.
+/// Both vectors are sparse.
+fn get_decision_value(m: &[(u32, f64)], x: &[u32]) -> f64 {
+    let mut res = 0.0;
+    for index in x {
+        match m.binary_search_by_key(index, |node| node.0) {
+            Ok(i) => res += m[i].1,
+            Err(..) => {}
         }
     }
+    res
 }
 
-fn train() -> Result<(), Box<dyn Error>> {
-    let root = Path::new("C:/msys64/home/we/rust/src/test/ui");
+/// Train classifier and write it to `model.json`.
+fn train(root: &Path) -> Result<(), Box<dyn Error>> {
+    // Build feature vectors for already classified tests.
     let mut feature_map = FeatureMap::default();
     feature_map.features.push(String::new()); // feature indices must start with 1
     let mut class_vectors = Vec::new();
@@ -179,6 +205,7 @@ fn train() -> Result<(), Box<dyn Error>> {
         class_vectors.push((class.to_owned(), vectors));
     }
 
+    // Turn feature vectors into input for liblinear.
     let mut labels = Vec::new();
     let mut features = Vec::new();
     for (class_idx, (_, vectors)) in class_vectors.iter().enumerate() {
@@ -187,15 +214,16 @@ fn train() -> Result<(), Box<dyn Error>> {
             features.push(vector.iter().copied().map(|i| (i, 1.0)).collect());
         }
     }
-
     let input_data =
         TrainingInput::from_sparse_features(labels, features).map_err(|e| e.to_string())?;
 
+    // Train liblinear model.
     let mut builder = LiblinearBuilder::new();
     builder.problem().input_data(input_data);
     builder.parameters().solver_type(SolverType::L1R_L2LOSS_SVC);
     let liblinear_model = builder.build_model()?;
 
+    // Convert the trained model into sparse representation.
     let mut classes = HashMap::default();
     for (class_idx, (class_name, _)) in class_vectors.iter().enumerate() {
         let class_idx = i32::try_from(class_idx).unwrap();
@@ -210,6 +238,8 @@ fn train() -> Result<(), Box<dyn Error>> {
         classes.insert(class_name.clone(), weights);
     }
 
+    // Write the model into file.
+    // FIXME: Make the output model file configurable.
     let model = Model { features: feature_map.map, classes };
     let model_str = serde_json::to_string(&model)?;
     fs::write("model.json", model_str)?;
@@ -217,13 +247,15 @@ fn train() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn classify() -> Result<(), Box<dyn Error>> {
-    let root = Path::new("C:/msys64/home/we/rust/src/test/ui");
-
+/// Read classifier from `model.json` and use it to classify tests.
+fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
+    // Read the model from file.
+    // FIXME: Make the input model file configurable.
     let model_str = fs::read_to_string("model.json")?;
     let mut model: Model = serde_json::from_str(&model_str)?;
     let mut feature_map = FeatureMap { map: mem::take(&mut model.features), features: Vec::new() };
 
+    // Classify tests that are not yet classified using the model.
     for dir in &[&root.join("issues"), root] {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -234,10 +266,11 @@ fn classify() -> Result<(), Box<dyn Error>> {
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), true);
                     let mut model_scores = Vec::new();
                     for (model_name, weights) in &model.classes {
-                        let score = get_dec_value(weights, &features);
+                        let score = get_decision_value(weights, &features);
                         model_scores.push((model_name, score));
                     }
 
+                    // Print three classes with highest decision values.
                     model_scores.sort_by(|(_, sc1), (_, sc2)| sc1.total_cmp(&sc2));
                     let mut msg = format!("{test_name}: ");
                     for (i, (name, score)) in model_scores.iter().rev().take(3).enumerate() {
@@ -255,23 +288,6 @@ fn classify() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-struct Model {
-    features: HashMap<String, u32>,
-    classes: HashMap<String, Vec<(u32, f64)>>,
-}
-
-fn get_dec_value(m: &[(u32, f64)], x: &[u32]) -> f64 {
-    let mut res = 0.0;
-    for index in x {
-        match m.binary_search_by_key(index, |node| node.0) {
-            Ok(i) => res += m[i].1,
-            Err(..) => {}
-        }
-    }
-    res
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("UI test classifier")
         .args_from_usage(
@@ -280,11 +296,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .get_matches();
 
+    // FIXME: Make it configurable.
+    let root = Path::new("C:/msys64/home/we/rust/src/test/ui");
+
     if matches.is_present("train") {
-        train()?;
+        train(root)?;
     }
     if matches.is_present("classify") {
-        classify()?;
+        classify(root)?;
     }
 
     Ok(())

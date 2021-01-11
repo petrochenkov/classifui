@@ -35,6 +35,11 @@ struct Model {
     classes: HashMap<String, Vec<(u32, f64)>>,
 }
 
+struct ClassifiedTest {
+    name: String,
+    class_scores: Vec<(String, f64)>,
+}
+
 impl FeatureMap {
     fn intern(&mut self, feature: Cow<str>, read_only: bool) -> Option<u32> {
         if let Some(index) = self.map.get(&*feature) {
@@ -47,6 +52,12 @@ impl FeatureMap {
             self.map.insert(feature.into_owned(), new_index);
             Some(new_index)
         }
+    }
+}
+
+impl ClassifiedTest {
+    fn max_score(&self) -> f64 {
+        self.class_scores[0].1
     }
 }
 
@@ -256,12 +267,12 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut feature_map = FeatureMap { map: mem::take(&mut model.features), features: Vec::new() };
 
     // Classify tests that are not yet classified using the model.
+    let mut classified_tests = Vec::new();
     for dir in &[&root.join("issues"), root] {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            if !entry.file_type()?.is_dir() && entry.file_name() != ".gitattributes" {
                 let path = entry.path();
-                let test_name = path.strip_prefix(root)?.display();
                 if let Ok(s) = fs::read_to_string(&path) {
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), true);
                     let mut model_scores = Vec::new();
@@ -272,17 +283,30 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
 
                     // Print three classes with highest decision values.
                     model_scores.sort_by(|(_, sc1), (_, sc2)| sc1.total_cmp(&sc2));
-                    let mut msg = format!("{test_name}: ");
-                    for (i, (name, score)) in model_scores.iter().rev().take(3).enumerate() {
-                        if i != 0 {
-                            msg.push_str(", ");
-                        }
-                        msg.push_str(&format!("{name} ({score:.3})"));
-                    }
-                    println!("{}", msg);
+                    classified_tests.push(ClassifiedTest {
+                        name: path.strip_prefix(root)?.display().to_string(),
+                        class_scores: model_scores
+                            .into_iter()
+                            .rev()
+                            .take(3)
+                            .map(|(name, score)| (name.clone(), score))
+                            .collect(),
+                    });
                 }
             }
         }
+    }
+
+    classified_tests.sort_by(|test1, test2| test2.max_score().total_cmp(&test1.max_score()));
+    for test in classified_tests {
+        let mut msg = format!("{}: ", test.name);
+        for (i, (name, score)) in test.class_scores.iter().enumerate() {
+            if i != 0 {
+                msg.push_str(", ");
+            }
+            msg.push_str(&format!("{name} ({score:.3})"));
+        }
+        println!("{}", msg);
     }
 
     Ok(())

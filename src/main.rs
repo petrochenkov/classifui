@@ -6,6 +6,7 @@ use clap::App;
 use fxhash::FxHashMap as HashMap;
 use liblinear::util::TrainingInput;
 use liblinear::{Builder as LiblinearBuilder, LibLinearModel as _, SolverType};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -297,9 +298,16 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let re = Regex::new(r"issue-(\d+)").unwrap();
     classified_tests.sort_by(|test1, test2| test2.max_score().total_cmp(&test1.max_score()));
     for test in classified_tests {
-        let mut msg = format!("{}: ", test.name);
+        let mut msg = match re.captures(&test.name) {
+            Some(captures) => format!(
+                "- [{}](https://github.com/rust-lang/rust/issues/{}): ",
+                test.name, &captures[1]
+            ),
+            None => format!("- {}: ", test.name),
+        };
         for (i, (name, score)) in test.class_scores.iter().enumerate() {
             if i != 0 {
                 msg.push_str(", ");

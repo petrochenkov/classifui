@@ -285,7 +285,7 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
                     // Print three classes with highest decision values.
                     model_scores.sort_by(|(_, sc1), (_, sc2)| sc1.total_cmp(&sc2));
                     classified_tests.push(ClassifiedTest {
-                        name: path.strip_prefix(root)?.display().to_string(),
+                        name: path.strip_prefix(root)?.display().to_string().replace("\\", "/"),
                         class_scores: model_scores
                             .into_iter()
                             .rev()
@@ -301,13 +301,17 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
     let re = Regex::new(r"issue-(\d+)").unwrap();
     classified_tests.sort_by(|test1, test2| test2.max_score().total_cmp(&test1.max_score()));
     for test in classified_tests {
-        let mut msg = match re.captures(&test.name) {
-            Some(captures) => format!(
-                "- [{}](https://github.com/rust-lang/rust/issues/{}): ",
-                test.name, &captures[1]
-            ),
-            None => format!("- {}: ", test.name),
-        };
+        let mut msg = format!(
+            "- [{}](https://github.com/rust-lang/rust/blob/master/src/test/ui/{})",
+            test.name, test.name
+        );
+        if let Some(captures) = re.captures(&test.name) {
+            msg.push_str(&format!(
+                " <sup>[issue](https://github.com/rust-lang/rust/issues/{})</sup>",
+                &captures[1]
+            ));
+        }
+        msg.push_str(": ");
         for (i, (name, score)) in test.class_scores.iter().enumerate() {
             if i != 0 {
                 msg.push_str(", ");

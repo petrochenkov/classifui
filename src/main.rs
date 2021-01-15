@@ -3,7 +3,7 @@
 #![feature(total_cmp)]
 
 use clap::App;
-use fxhash::FxHashMap as HashMap;
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use liblinear::util::TrainingInput;
 use liblinear::{Builder as LiblinearBuilder, LibLinearModel as _, SolverType};
 use regex::Regex;
@@ -277,22 +277,29 @@ fn train(root: &Path) -> Result<(), Box<dyn Error>> {
 
     // Convert the trained model into sparse representation.
     let mut classes = HashMap::default();
+    let mut used_features = HashSet::default();
     for (class_idx, (class_name, _)) in class_vectors.iter().enumerate() {
         let class_idx = i32::try_from(class_idx).unwrap();
         let mut weights = Vec::new();
         for feature_index in 1..i32::try_from(liblinear_model.num_features()).unwrap() + 1 {
             let weight = liblinear_model.feature_coefficient(feature_index, class_idx);
             if weight != 0.0 {
-                weights.push((u32::try_from(feature_index).unwrap(), weight));
+                let index = u32::try_from(feature_index).unwrap();
+                weights.push((index, weight));
+                used_features.insert(index);
             }
         }
 
         classes.insert(class_name.clone(), weights);
     }
 
+    // Throw away features that ended up unused from the table.
+    let features =
+        feature_map.map.into_iter().filter(|(_, index)| used_features.contains(index)).collect();
+
     // Write the model into file.
     // FIXME: Make the output model file configurable.
-    let model = Model { features: feature_map.map, classes };
+    let model = Model { features, classes };
     let model_str = serde_json::to_string(&model)?;
     fs::write("model.json", model_str)?;
 

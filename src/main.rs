@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::path::Path;
@@ -169,6 +170,41 @@ fn tokens_to_features(
     res
 }
 
+/// Merge features from `foo.rs` and `foo.stderr` into a single feature vector
+/// that corresponds to a single test case including multiple files.
+fn files_to_tests(files: HashMap<String, RefCell<Vec<u32>>>) -> HashMap<String, Vec<u32>> {
+    let mut res = HashMap::default();
+    for (name, features) in &files {
+        let mut key = name.to_string();
+        let prefix = if let prefix @ Some(_) = name.strip_suffix(".nll.stderr") {
+            prefix
+        } else if let prefix @ Some(_) = name.strip_suffix(".stderr") {
+            prefix
+        } else if let prefix @ Some(_) = name.strip_suffix(".stdout") {
+            prefix
+        } else if let prefix @ Some(_) = name.strip_suffix(".fixed") {
+            prefix
+        } else {
+            None
+        };
+        if let Some(prefix) = prefix {
+            let normalized = prefix.to_string() + ".rs";
+            if files.contains_key(&normalized) {
+                key = normalized;
+            }
+        }
+
+        merge_features(res.entry(key).or_default(), &mut features.borrow_mut());
+    }
+    res
+}
+
+fn merge_features(dst: &mut Vec<u32>, src: &mut Vec<u32>) {
+    dst.append(src);
+    dst.sort_unstable();
+    dst.dedup();
+}
+
 /// Dot product of weight vector from the trained linear model
 /// and feature vector from a new test case that needs to be classified.
 /// Both vectors are sparse.
@@ -202,7 +238,7 @@ fn train(root: &Path) -> Result<(), Box<dyn Error>> {
 
         let top_path = top_entry.path();
         let class = top_path.file_name().unwrap().to_str().unwrap();
-        let mut vectors = Vec::new();
+        let mut files = HashMap::default();
         for entry in
             WalkDir::new(&top_path).into_iter().filter_entry(|e| e.file_name() != "auxiliary")
         {
@@ -210,18 +246,22 @@ fn train(root: &Path) -> Result<(), Box<dyn Error>> {
             if !entry.file_type().is_dir() {
                 let path = entry.path();
                 if let Ok(s) = fs::read_to_string(path) {
-                    vectors.push(tokens_to_features(&mut feature_map, &tokenize(&s), false));
+                    let file_name =
+                        path.strip_prefix(root)?.display().to_string().replace("\\", "/");
+                    let features = tokens_to_features(&mut feature_map, &tokenize(&s), false);
+                    files.insert(file_name, RefCell::new(features));
                 }
             }
         }
-        class_vectors.push((class.to_owned(), vectors));
+
+        class_vectors.push((class.to_owned(), files_to_tests(files)));
     }
 
     // Turn feature vectors into input for liblinear.
     let mut labels = Vec::new();
     let mut features = Vec::new();
     for (class_idx, (_, vectors)) in class_vectors.iter().enumerate() {
-        for vector in vectors {
+        for (_, vector) in vectors {
             labels.push(class_idx as f64);
             features.push(vector.iter().copied().map(|i| (i, 1.0)).collect());
         }
@@ -268,34 +308,41 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut feature_map = FeatureMap { map: mem::take(&mut model.features), features: Vec::new() };
 
     // Classify tests that are not yet classified using the model.
-    let mut classified_tests = Vec::new();
+    let mut files = HashMap::default();
     for dir in &[&root.join("issues"), root] {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() && entry.file_name() != ".gitattributes" {
                 let path = entry.path();
                 if let Ok(s) = fs::read_to_string(&path) {
+                    let file_name =
+                        path.strip_prefix(root)?.display().to_string().replace("\\", "/");
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), true);
-                    let mut model_scores = Vec::new();
-                    for (model_name, weights) in &model.classes {
-                        let score = get_decision_value(weights, &features);
-                        model_scores.push((model_name, score));
-                    }
-
-                    // Print three classes with highest decision values.
-                    model_scores.sort_by(|(_, sc1), (_, sc2)| sc1.total_cmp(&sc2));
-                    classified_tests.push(ClassifiedTest {
-                        name: path.strip_prefix(root)?.display().to_string().replace("\\", "/"),
-                        class_scores: model_scores
-                            .into_iter()
-                            .rev()
-                            .take(3)
-                            .map(|(name, score)| (name.clone(), score))
-                            .collect(),
-                    });
+                    files.insert(file_name, RefCell::new(features));
                 }
             }
         }
+    }
+
+    let mut classified_tests = Vec::new();
+    for (name, features) in files_to_tests(files) {
+        let mut model_scores = Vec::new();
+        for (model_name, weights) in &model.classes {
+            let score = get_decision_value(weights, &features);
+            model_scores.push((model_name, score));
+        }
+
+        // Print three classes with highest decision values.
+        model_scores.sort_by(|(_, sc1), (_, sc2)| sc1.total_cmp(&sc2));
+        classified_tests.push(ClassifiedTest {
+            name,
+            class_scores: model_scores
+                .into_iter()
+                .rev()
+                .take(3)
+                .map(|(name, score)| (name.clone(), score))
+                .collect(),
+        });
     }
 
     let re = Regex::new(r"issue-(\d+)").unwrap();

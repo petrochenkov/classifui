@@ -126,8 +126,69 @@ fn tokenize(s: &str) -> Vec<String> {
 
 /// Turns all identifiers and digits into a single token.
 fn generalize(s: &str) -> &str {
+    const KEYWORDS: &[&str] = &[
+        "_",
+        "as",
+        "break",
+        "const",
+        "continue",
+        "crate",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "fn",
+        "for",
+        "if",
+        "impl",
+        "in",
+        "let",
+        "loop",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "pub",
+        "ref",
+        "return",
+        "self",
+        "Self",
+        "static",
+        "struct",
+        "super",
+        "trait",
+        "true",
+        "type",
+        "unsafe",
+        "use",
+        "where",
+        "while",
+        "abstract",
+        "become",
+        "box",
+        "do",
+        "final",
+        "macro",
+        "override",
+        "priv",
+        "typeof",
+        "unsized",
+        "virtual",
+        "yield",
+        "async",
+        "await",
+        "dyn",
+        "try",
+        "auto",
+        "catch",
+        "default",
+        "macro_rules",
+        "raw",
+        "union",
+    ];
+
     let first_char = s.chars().next().unwrap();
-    if is_id_continue(first_char) {
+    if is_id_continue(first_char) && !KEYWORDS.contains(&s) {
         if is_id_start(first_char) { "и" } else { "ц" }
     } else {
         s
@@ -221,6 +282,9 @@ fn get_decision_value(m: &[(u32, f64)], x: &[u32]) -> f64 {
 
 /// Train classifier and write it to `model.json`.
 fn train(root: &Path) -> Result<(), Box<dyn Error>> {
+    const EXCLUDED_SUBDIRS: &[&str] =
+        &["auxiliary", "bad", "did_you_mean", "error-codes", "issues", "rfcs", "span"];
+
     // Build feature vectors for already classified tests.
     let mut feature_map = FeatureMap::default();
     feature_map.features.push(String::new()); // feature indices must start with 1
@@ -228,10 +292,7 @@ fn train(root: &Path) -> Result<(), Box<dyn Error>> {
     for top_entry in fs::read_dir(root)? {
         let top_entry = top_entry?;
         if !top_entry.file_type()?.is_dir()
-            || top_entry.file_name() == "auxiliary"
-            || top_entry.file_name() == "issues"
-            || top_entry.file_name() == "error-codes"
-            || top_entry.file_name() == "rfcs"
+            || EXCLUDED_SUBDIRS.contains(&top_entry.file_name().to_str().unwrap())
         {
             continue;
         }

@@ -417,16 +417,17 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
     classified_tests.sort_by(|test1, test2| test2.max_score().total_cmp(&test1.max_score()));
     for test in classified_tests {
         let mut msg = format!(
-            "- [{}](https://github.com/rust-lang/rust/blob/master/src/test/ui/{})",
+            "- [{}](https://github.com/rust-lang/rust/blob/master/src/test/ui/{}) <sup>",
             test.name, test.name
         );
-        if let Some(captures) = re.captures(&test.name) {
-            msg.push_str(&format!(
-                " <sup>[issue](https://github.com/rust-lang/rust/issues/{})</sup>",
-                &captures[1]
-            ));
-        }
-        msg.push_str(": ");
+        let issue = match re.captures(&test.name) {
+            Some(captures) => {
+                format!("[issue](https://github.com/rust-lang/rust/issues/{})", &captures[1])
+            }
+            None => "unknown".to_string(),
+        };
+        msg.push_str(&issue);
+        msg.push_str("</sup>: ");
         for (i, (name, score)) in test.class_scores.iter().enumerate() {
             if i != 0 {
                 msg.push_str(", ");

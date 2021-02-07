@@ -282,8 +282,16 @@ fn get_decision_value(m: &[(u32, f64)], x: &[u32]) -> f64 {
 
 /// Train classifier and write it to `model.json`.
 fn train(root: &Path) -> Result<(), Box<dyn Error>> {
-    const EXCLUDED_SUBDIRS: &[&str] =
-        &["auxiliary", "bad", "did_you_mean", "error-codes", "issues", "rfcs", "span"];
+    const EXCLUDED_SUBDIRS: &[&str] = &[
+        "auxiliary",
+        "bad",
+        "did_you_mean",
+        "error-codes",
+        "issues",
+        "rfcs",
+        "span",
+        "suggestions",
+    ];
 
     // Build feature vectors for already classified tests.
     let mut feature_map = FeatureMap::default();

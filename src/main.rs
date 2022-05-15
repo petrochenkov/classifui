@@ -1,8 +1,6 @@
 #![feature(array_windows)]
-#![feature(format_args_capture)]
-#![feature(total_cmp)]
 
-use clap::App;
+use clap::{arg, Command};
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use liblinear::util::TrainingInput;
 use liblinear::{Builder as LiblinearBuilder, LibLinearModel as _, SolverType};
@@ -14,6 +12,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::convert::TryFrom;
 use std::error::Error;
+use std::fmt::Write;
 use std::path::Path;
 use std::{fs, mem};
 
@@ -243,10 +242,8 @@ fn files_to_tests(files: HashMap<String, RefCell<Vec<u32>>>) -> HashMap<String, 
             prefix
         } else if let prefix @ Some(_) = name.strip_suffix(".stdout") {
             prefix
-        } else if let prefix @ Some(_) = name.strip_suffix(".fixed") {
-            prefix
         } else {
-            None
+            name.strip_suffix(".fixed")
         };
         if let Some(prefix) = prefix {
             let normalized = prefix.to_string() + ".rs";
@@ -272,9 +269,8 @@ fn merge_features(dst: &mut Vec<u32>, src: &mut Vec<u32>) {
 fn get_decision_value(m: &[(u32, f64)], x: &[u32]) -> f64 {
     let mut res = 0.0;
     for index in x {
-        match m.binary_search_by_key(index, |node| node.0) {
-            Ok(i) => res += m[i].1,
-            Err(..) => {}
+        if let Ok(i) = m.binary_search_by_key(index, |node| node.0) {
+            res += m[i].1
         }
     }
     res
@@ -316,7 +312,7 @@ fn train(root: &Path) -> Result<(), Box<dyn Error>> {
                 let path = entry.path();
                 if let Ok(s) = fs::read_to_string(path) {
                     let file_name =
-                        path.strip_prefix(root)?.display().to_string().replace("\\", "/");
+                        path.strip_prefix(root)?.display().to_string().replace('\\', "/");
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), false);
                     files.insert(file_name, RefCell::new(features));
                 }
@@ -330,7 +326,7 @@ fn train(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut labels = Vec::new();
     let mut features = Vec::new();
     for (class_idx, (_, vectors)) in class_vectors.iter().enumerate() {
-        for (_, vector) in vectors {
+        for vector in vectors.values() {
             labels.push(class_idx as f64);
             features.push(vector.iter().copied().map(|i| (i, 1.0)).collect());
         }
@@ -392,7 +388,7 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
                 let path = entry.path();
                 if let Ok(s) = fs::read_to_string(&path) {
                     let file_name =
-                        path.strip_prefix(root)?.display().to_string().replace("\\", "/");
+                        path.strip_prefix(root)?.display().to_string().replace('\\', "/");
                     let features = tokens_to_features(&mut feature_map, &tokenize(&s), true);
                     files.insert(file_name, RefCell::new(features));
                 }
@@ -409,7 +405,7 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
         }
 
         // Print three classes with highest decision values.
-        model_scores.sort_by(|(_, sc1), (_, sc2)| sc1.total_cmp(&sc2));
+        model_scores.sort_by(|(_, sc1), (_, sc2)| sc1.total_cmp(sc2));
         classified_tests.push(ClassifiedTest {
             name,
             class_scores: model_scores
@@ -440,7 +436,7 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
             if i != 0 {
                 msg.push_str(", ");
             }
-            msg.push_str(&format!("{name} ({score:.3})"));
+            write!(msg, "{name} ({score:.3})")?;
         }
         println!("{}", msg);
     }
@@ -449,11 +445,8 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let matches = App::new("UI test classifier")
-        .args_from_usage(
-            "--train 'Train the classifier'
-             --classify 'Classify tests'",
-        )
+    let matches = Command::new("UI test classifier")
+        .args(&[arg!(--train "Train the classifier"), arg!(--classify "Classify tests")])
         .get_matches();
 
     // FIXME: Make it configurable.

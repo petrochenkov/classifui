@@ -65,8 +65,8 @@ impl ClassifiedTest {
 fn is_id_start(c: char) -> bool {
     // This is XID_Start OR '_' (which formally is not a XID_Start).
     // We also add fast-path for ascii idents
-    ('a'..='z').contains(&c)
-        || ('A'..='Z').contains(&c)
+    c.is_ascii_lowercase()
+        || c.is_ascii_uppercase()
         || c == '_'
         || (c > '\x7f' && unicode_xid::UnicodeXID::is_xid_start(c))
 }
@@ -74,9 +74,9 @@ fn is_id_start(c: char) -> bool {
 fn is_id_continue(c: char) -> bool {
     // This is exactly XID_Continue.
     // We also add fast-path for ascii idents
-    ('a'..='z').contains(&c)
-        || ('A'..='Z').contains(&c)
-        || ('0'..='9').contains(&c)
+    c.is_ascii_lowercase()
+        || c.is_ascii_uppercase()
+        || c.is_ascii_digit()
         || c == '_'
         || (c > '\x7f' && unicode_xid::UnicodeXID::is_xid_continue(c))
 }
@@ -421,7 +421,7 @@ fn classify(root: &Path) -> Result<(), Box<dyn Error>> {
     classified_tests.sort_by(|test1, test2| test2.max_score().total_cmp(&test1.max_score()));
     for test in classified_tests {
         let mut msg = format!(
-            "- [{}](https://github.com/rust-lang/rust/blob/master/src/test/ui/{}) <sup>",
+            "- [{}](https://github.com/rust-lang/rust/blob/master/tests/ui/{}) <sup>",
             test.name, test.name
         );
         let issue = match re.captures(&test.name) {
@@ -450,12 +450,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .get_matches();
 
     // FIXME: Make it configurable.
-    let root = Path::new("C:/msys64/home/we/rust/src/test/ui");
+    let root = Path::new("C:/msys64/home/we/rust/tests/ui");
 
-    if matches.is_present("train") {
+    if matches.get_flag("train") {
         train(root)?;
     }
-    if matches.is_present("classify") {
+    if matches.get_flag("classify") {
         classify(root)?;
     }
 
